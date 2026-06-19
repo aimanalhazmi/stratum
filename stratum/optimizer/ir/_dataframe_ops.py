@@ -1,6 +1,6 @@
 from typing import Callable
 from collections.abc import Sequence
-from stratum.optimizer.ir._ops import (OperandRef, BaseEstimatorOp, BinOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp,
+from stratum.optimizer.ir._ops import (OperandRef, OutputType, is_frame_like, BaseEstimatorOp, BinOp, CallOp, ChoiceOp, GetAttrOp, GetItemOp,
                                        MethodCallOp, Op, ValueOp, VariableOp,_resolve_args, _resolve_kwargs)
 from pandas import DataFrame
 import pandas as pd
@@ -27,7 +27,9 @@ class DataSourceOp(Op):
         self.file_path = file_path
         self.read_args = read_args
         self.read_kwargs = read_kwargs
-        self.is_dataframe_op = format != "npy"
+        # A directly-passed DataFrame or a csv read is a FRAME; np.load yields an
+        # ndarray, so an npy source is a MATRIX.
+        self.output_type = OutputType.MATRIX if _format == "npy" else OutputType.FRAME
 
     def process(self, mode: str, environment: dict, inputs: list):
         if self.data is not None:
@@ -73,7 +75,7 @@ class JoinOp(Op):
         self.left_index = left_index
         self.right_index = right_index
         self.suffixes = suffixes
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
 
     def process(self, mode: str, environment: dict, inputs: list):
         if len(inputs) != 2:
@@ -112,7 +114,7 @@ class AggregateOp(Op):
         self.grouping_attributes = grouping_attributes
         self.aggregations = aggregations
         self.groupby_kwargs = groupby_kwargs or {}
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
 
     def __str__(self):
         return f"AggregateOp(by={self.grouping_attributes}, agg={self.aggregations}) [df]"
@@ -135,7 +137,7 @@ class MetadataOp(Op):
         self.func = func
         self.args = args
         self.kwargs = kwargs
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
 
     def process(self, mode: str, environment: dict, inputs: list):
         _obj = inputs[0]
@@ -170,7 +172,7 @@ class ProjectionOp(Op):
         self.args = args
         self.columns = columns
         self.kwargs = kwargs
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
 
     def _extract_args_and_kwargs(self, inputs: list):
         """Extract and process arguments and kwargs from inputs."""
@@ -296,7 +298,7 @@ class GetAttrProjectionOp(Op):
         super().__init__(name=attr_name_str)
         self.inputs = inputs
         self.outputs = outputs
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
 
     def __str__(self):
         attr_name = ".".join(self.attr_name)
@@ -326,7 +328,7 @@ class GroupedDataframeOp(Op):
     def __init__(self, ops: list[Op]):
         super().__init__(name="GROUPED_DATAFRAME", is_X=False, is_y=False)
         self.ops = ops
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
 
     def process(self, mode: str, environment: dict, inputs: list):  # pragma: no cover
         # TODO: GroupedDataframeOp is experimental and not integrated yet.
@@ -346,7 +348,7 @@ class ConcatOp(Op):
         self.first = first
         self.others = list(others)
         self.axis = axis
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
 
     def process(self, mode: str, environment: dict, inputs: list):
         first = inputs[self.first.k] if isinstance(self.first, OperandRef) else self.first
@@ -362,7 +364,7 @@ class SplitOp(Op):
     def __init__(self, inputs: list[Op]=None, outputs: list[Op]=None):
         super().__init__(name="Train/Test", is_X=False, is_y=False, inputs=inputs, outputs=outputs)
         self.is_split_op = True
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
         self.indices = None
 
     def process(self, mode: str, environment: dict, inputs: list):
@@ -383,7 +385,7 @@ class SplitOutput(Op):
         name = "X" if is_x else "y"
         super().__init__(name=name, is_X=False, is_y=False, inputs=inputs, outputs=outputs)
         self.is_x = is_x
-        self.is_dataframe_op = True
+        self.output_type = OutputType.FRAME
 
     def process(self, mode: str, environment: dict, inputs: list):
         if self.is_x:
@@ -415,6 +417,24 @@ def add_splitting_op(root: Op) -> Op:
     log_time("splitting took", start)
     return root
 
+def _getitem_output_type(op: GetItemOp) -> OutputType:
+    """Infer the output type of a ``GetItemOp`` whose container is frame-like.
+
+    Indexing into a SERIES yields a SERIES. For a FRAME: ``df["col"]`` selects a
+    single column -> SERIES; ``df[["a", "b"]]`` selects a sub-frame -> FRAME;
+    ``df[mask]`` / ``df[label_series]`` (a graph-fed key, i.e. an
+    :class:`OperandRef`) or a slice selects rows -> FRAME.
+    """
+    container = op.inputs[0]
+    if container.output_type is OutputType.SERIES:
+        return OutputType.SERIES
+    # container is a FRAME (the only other frame-like type reaching here).
+    if isinstance(op.key, str):
+        return OutputType.SERIES
+    # list/tuple of columns, an OperandRef mask, or a slice -> FRAME.
+    return OutputType.FRAME
+
+
 def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
     new_op = None
     # DataSource detection (directly passed dataframe)
@@ -423,16 +443,17 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
             new_op = DataSourceOp(data=op.value)
             new_op.outputs = op.outputs
 
-    # DataSource detection (read operation)
-    elif not op.inputs[0].is_dataframe_op:
+    # DataSource detection (read operation): the input is not frame-world data --
+    # a raw value (path / variable), or a numpy MATRIX left to the numeric path.
+    elif not is_frame_like(op.inputs[0]):
         if isinstance(op, CallOp):
             if op.func is pd.read_csv:
                 new_op = make_read_op(op)
-            
+
             elif op.func is np.load:
                 new_op = make_read_op(op, "npy")
 
-    # input is a dataframe op
+    # input is frame-world data (a frame or a series): this is a dataframe op
     else:
         if isinstance(op, CallOp):
             # Datetime conversion detection
@@ -443,7 +464,7 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
             if op.method_name == "groupby":
                 # Leave groupby as-is; mark it as a dataframe op so the following
                 # aggregation call is visited and can fuse with it.
-                op.is_dataframe_op = True
+                op.output_type = OutputType.FRAME
             elif _is_aggregation(op):
                 new_op = make_aggregate_op(op)
             elif op.method_name in ["rename"]:
@@ -455,6 +476,9 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
                 op.replace_output_of_inputs(new_op)
             elif op.method_name == "apply":
                 new_op = ApplyUDFOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+                # apply on a column yields a column, on a frame yields a frame:
+                # keep the input's kind (ProjectionOp defaults to FRAME).
+                new_op.output_type = op.inputs[0].output_type
                 op.replace_output_of_inputs(new_op)
             elif op.method_name in ["assign"]:
                 new_op = AssignOp(args=op.args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
@@ -463,21 +487,27 @@ def extract_dataframe_op(op: Op, root: Op) -> tuple[Op, bool]:
                 new_op = make_join_op(op)
 
         # GetAttr Fusing and conversion to GetAttrDataframeOp
-        elif isinstance(op, GetAttrOp) and op.inputs[0].is_dataframe_op:
+        elif isinstance(op, GetAttrOp):
             new_op = make_frame_get_attr(new_op, op)
 
-        # Projection: BinOp detection
-        elif isinstance(op, BinOp) and op.inputs[0].is_dataframe_op:
-            op.is_dataframe_op = True
+        # Projection: BinOp over tabular data -> same tabular kind as its operand
+        # (e.g. `df["a"] > 7` is a SERIES, `df + 1` is a FRAME).
+        elif isinstance(op, BinOp):
+            op.output_type = op.inputs[0].output_type
 
-        # mark as dataframe op
-        elif isinstance(op, GetItemOp) or isinstance(op, BaseEstimatorOp):
-            op.is_dataframe_op = True
+        # GetItem: column projection (SERIES) / sub-frame / row selection (FRAME).
+        elif isinstance(op, GetItemOp):
+            op.output_type = _getitem_output_type(op)
+
+        elif isinstance(op, BaseEstimatorOp):
+            op.output_type = OutputType.FRAME
 
         elif isinstance(op, ChoiceOp):
-            # check if all outcomes are dataframe ops
-            if all(outcome.is_dataframe_op for outcome in op.inputs):
-                op.is_dataframe_op = True
+            # Propagate a shared frame type across all outcomes; mixed kinds fall
+            # back to FRAME.
+            if all(is_frame_like(outcome) for outcome in op.inputs):
+                types = {outcome.output_type for outcome in op.inputs}
+                op.output_type = types.pop() if len(types) == 1 else OutputType.FRAME
 
     if new_op is None:
         return root, False
@@ -577,6 +607,10 @@ def make_datetime_conversion_op(op: CallOp) -> DatetimeConversionOp:
         args = ()
 
     new_op = DatetimeConversionOp(args=args, kwargs=op.kwargs, inputs=op.inputs, outputs=op.outputs)
+    # Converting a column yields a column and a frame yields a frame: keep the
+    # input's kind (ProjectionOp defaults to FRAME).
+    if op.inputs:
+        new_op.output_type = op.inputs[0].output_type
     op.replace_output_of_inputs(new_op)
     return new_op
 
@@ -729,6 +763,9 @@ def make_frame_get_attr(new_op: GetAttrProjectionOp, op: GetAttrOp) -> GetAttrPr
 
         new_input = input_.inputs[0]
         new_op = GetAttrProjectionOp(attr_name=concat_attr_name, inputs=[new_input], outputs=op.outputs)
+        # Attribute access (e.g. `.dt.year`, `.str...`) keeps the container's
+        # tabular kind: a series stays a series, a frame stays a frame.
+        new_op.output_type = new_input.output_type
 
         if len(input_.outputs) > 1:
             input_.outputs.remove(op)
@@ -740,6 +777,7 @@ def make_frame_get_attr(new_op: GetAttrProjectionOp, op: GetAttrOp) -> GetAttrPr
         # Convert single GetAttrOp to GetAttrDataframeOp
         attr_name = op.attr_name if isinstance(op.attr_name, list) else [op.attr_name]
         new_op = GetAttrProjectionOp(attr_name=attr_name, inputs=op.inputs, outputs=op.outputs)
+        new_op.output_type = input_.output_type
         op.replace_output_of_inputs(new_op)
     return new_op
 

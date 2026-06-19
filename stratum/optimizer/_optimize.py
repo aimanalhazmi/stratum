@@ -96,16 +96,10 @@ def optimize(dag_root: DataOp, config: OptConfig = None):
     root = add_splitting_op(root)
     _debug_validate_dag(root)  # operand refs as wired by as_op
 
-    # Extract specialized operators from generic MethodCallOp / CallOp
+    # Extract specialized operators from generic MethodCallOp / CallOp.
     if config.dataframe_ops:
-        if config.numeric_ops:
-            # Fused extraction of frame and numeric ops
-            root = extract_frame_and_numeric_operators(root)
-        else:
-            # Extract only dataframe ops
-            root = extract_frame_operators(root)
-    elif config.numeric_ops:
-        # Extract only numeric ops
+        root = extract_frame_operators(root)
+    if config.numeric_ops:
         root = extract_numeric_operators(root)
 
     # Unrolling of choices to a dag with only a single ChoiceOp at the end
@@ -145,6 +139,7 @@ def extract_frame_operators(root):
     for op in topological_iterator(root):
         root, _ = extract_dataframe_op(op, root)
     log_time("dataframe_rewrite took", start)
+    _debug_show_graph(root, "frame_rewrite")
     return root
 
 
@@ -154,18 +149,7 @@ def extract_numeric_operators(root):
     for op in topological_iterator(root):
         root, _ = extract_numeric_op(op, root)
     log_time("to_numeric took", start)
-    return root
-
-
-def extract_frame_and_numeric_operators(root):
-    """ Rewrite the dataframe ops in the dag to the new dataframe ops."""
-    start = start_time()
-    for op in topological_iterator(root):
-        root, matched = extract_dataframe_op(op, root)
-        if not matched:
-            root, _ = extract_numeric_op(op, root)
-    log_time("frame_and_numeric_rewrite took", start)
-    _debug_show_graph(root, "frame_and_numeric_rewrite")
+    _debug_show_graph(root, "numeric_rewrite")
     return root
 
 

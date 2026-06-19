@@ -11,7 +11,7 @@ from sklearn.preprocessing import StandardScaler
 from skrub._data_ops._data_ops import DataOp
 
 from stratum.optimizer.ir._ops import (
-    OperandRef, OperandBinder, BinOp, CallOp, DummyConfigManager, GetAttrOp,
+    OperandRef, OperandBinder, OutputType, BinOp, CallOp, DummyConfigManager, GetAttrOp,
     GetItemOp, ImplOp, MethodCallOp, Op, SearchEvalOp, ValueOp,
     VariableOp, check_estm_inputs, estimator_parallel_config,
     estm_supports_polars, process_estimator_task, process_transformer_task,
@@ -215,7 +215,7 @@ class TestOpProcess(unittest.TestCase):
 
     def test_getattr_dataframe_op(self):
         op = GetAttrOp(attr_name=["real", "imag"])
-        op.is_dataframe_op = True
+        op.output_type = OutputType.FRAME
         result = op.process("fit_transform", {}, [1 + 2j])
         self.assertEqual(result, 0.0)
 

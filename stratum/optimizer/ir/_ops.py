@@ -1,4 +1,5 @@
 from __future__ import annotations
+from enum import Enum, auto
 from types import SimpleNamespace
 from typing import Callable
 
@@ -14,6 +15,44 @@ from stratum.utils._skrub_graph import _collect_child_data_ops
 import logging
 import os
 logger = logging.getLogger(__name__)
+
+
+class OutputType(Enum):
+    """The kind of value an :class:`Op` produces.
+
+    Replaces the old boolean ``is_dataframe_op`` flag with a small lattice so that
+    rewrites can distinguish a single column (``SERIES``) from a whole table
+    (``FRAME``). Telling the two apart is what lets selection detection recognise
+    ``df[mask]`` as a relational selection (the ``mask`` is a ``SERIES``).
+
+    Boolean-ness is *not* a separate output type: a boolean mask is just a
+    ``SERIES`` whose values happen to be booleans (a value-level property), so it
+    is tracked separately rather than as its own enum member.
+
+    ``UNKNOWN`` is the default (the op produces a non-tabular Python value, e.g. a
+    scalar or an arbitrary object) and corresponds to the old ``is_dataframe_op =
+    False``. ``MATRIX`` is ndarray-valued (e.g. ``np.load``) and is deliberately
+    *not* a frame type: numpy data is handled by the numeric extraction path, not
+    the dataframe path. (A ``VECTOR`` type will be added once we have an op that
+    produces one -- e.g. a GetItem/aggregation on a MATRIX.)
+    """
+    UNKNOWN = auto()
+    FRAME = auto()
+    SERIES = auto()
+    SCALAR = auto()
+    MATRIX = auto()
+
+
+# Output types that belong to the dataframe (pandas/polars) world. A frame and a
+# series are both manipulated by the dataframe extraction path; a MATRIX (numpy)
+# is not. Used to decide whether an op consumes already-produced frame data (a
+# dataframe operation) or a leaf/raw value (a read/source).
+FRAME_TYPES = frozenset({OutputType.FRAME, OutputType.SERIES})
+
+
+def is_frame_like(op) -> bool:
+    """True if ``op`` produces frame-world data (a frame or a series)."""
+    return op.output_type in FRAME_TYPES
 
 
 def _operand_index_from_impl(skrub_impl) -> dict:
@@ -192,14 +231,14 @@ class Op():
         self.inputs = inputs if inputs is not None else []
         self.is_X = is_X
         self.is_y = is_y
-        self.is_dataframe_op = False
+        self.output_type = OutputType.UNKNOWN
         self.is_split_op = False
         self.was_cloned = False
         self.remove_after: list[Op] = []
 
     def to_str_helper(self):
         class_name = self.__class__.__name__
-        is_df = " [df]" if self.is_dataframe_op else ""
+        is_df = " [df]" if self.output_type is OutputType.FRAME else ""
         name = f"({self.name})" if self.name and len(self.name) > 0 else ""
         # truncate name if it is too long
         if len(name) > 50:
@@ -643,7 +682,7 @@ class GetAttrOp(Op):
         self.attr_name = attr_name
 
     def process(self, mode: str, environment: dict, inputs: list):
-        if self.is_dataframe_op:
+        if self.output_type is OutputType.FRAME:
             result = inputs[0]
             for attr in self.attr_name:
                 result = getattr(result, attr)

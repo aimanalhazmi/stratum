@@ -2,13 +2,11 @@ import os
 import tempfile
 import unittest
 from contextlib import contextmanager
-from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
 import polars as pl
 import stratum as st
-from skrub._data_ops._data_ops import DataOp
 from stratum._config import FLAGS
 from stratum.optimizer._optimize import OptConfig, optimize as optimize_
 from stratum.optimizer.ir._dataframe_ops import (
@@ -17,7 +15,7 @@ from stratum.optimizer.ir._dataframe_ops import (
     ProjectionOp, SplitOp, _extract_aggregations, _extract_grouping,
     _is_aggregation, _is_groupby_op, make_aggregate_op,
     make_datetime_conversion_op, make_read_op)
-from stratum.optimizer.ir._ops import (CallOp, OperandRef, GetItemOp,
+from stratum.optimizer.ir._ops import (CallOp, OperandRef, OutputType, GetItemOp,
                                        MethodCallOp, Op, ValueOp)
 from stratum.runtime._buffer_pool import BufferPool
 
@@ -30,7 +28,7 @@ def optimize(dag, conf=None):
 def _inp(val):
     op = Op()
     op.intermediate = val
-    op.is_dataframe_op = True
+    op.output_type = OutputType.FRAME
     return op
 
 
