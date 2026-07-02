@@ -264,3 +264,30 @@ class TestCSE(unittest.TestCase):
         out, *_ = optimize(root)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0].process("fit", [out[0].value]), 2)
+
+    def test_abs_abs_collapses_to_single_abs(self):
+        df = st.as_data_op(-3)
+        t1 = df.skb.apply_func(np.abs)
+        t2 = t1.skb.apply_func(np.abs)
+        out, *_ = optimize(t2)
+
+        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.ABS)
+
+    def test_abs_abs_disabled(self):
+        df = st.as_data_op(-3)
+        t1 = df.skb.apply_func(np.abs)
+        t2 = t1.skb.apply_func(np.abs)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(abs_abs=False),
+        )
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 3)
+
+    def test_single_abs_untouched(self):
+        df = st.as_data_op(-3)
+        t1 = df.skb.apply_func(np.abs)
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
