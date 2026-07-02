@@ -275,19 +275,45 @@ class TestCSE(unittest.TestCase):
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.ABS)
 
+    def test_single_abs_untouched(self):
+        df = st.as_data_op(-3)
+        t1 = df.skb.apply_func(np.abs)
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 2)
+
+    def test_abs_abs_with_trailing_op(self):
+        df = st.as_data_op(-3)
+        t1 = df.skb.apply_func(np.abs)
+        t2 = t1.skb.apply_func(np.abs)
+        t3 = t2.skb.apply_func(np.log1p)
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 3)
+
+    def test_no_rewrite_abs_sqrt(self):
+        df = st.as_data_op(4)
+        t1 = df.skb.apply_func(np.abs)
+        t2 = t1.skb.apply_func(np.sqrt)
+        out, *_ = optimize(t2)
+        self.assertEqual(len(out), 3)
+
     def test_abs_abs_disabled(self):
         df = st.as_data_op(-3)
         t1 = df.skb.apply_func(np.abs)
         t2 = t1.skb.apply_func(np.abs)
         config = OptConfig(
             algebraic_rewrites=True,
-            algebraic_rewrite_config=AlgebraicRewritesConfig(abs_abs=False),
+            algebraic_rewrite_config=AlgebraicRewritesConfig(abs_abs=False)
         )
         out, *_ = optimize(t2, config=config)
         self.assertEqual(len(out), 3)
 
-    def test_single_abs_untouched(self):
-        df = st.as_data_op(-3)
-        t1 = df.skb.apply_func(np.abs)
-        out, *_ = optimize(t1)
-        self.assertEqual(len(out), 2)
+    def test_disable_abs_abs_does_not_affect_log_exp(self):
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+        config = OptConfig(
+            algebraic_rewrites=True,
+            algebraic_rewrite_config=AlgebraicRewritesConfig(abs_abs=False)
+        )
+        out, *_ = optimize(t2, config=config)
+        self.assertEqual(len(out), 1)
