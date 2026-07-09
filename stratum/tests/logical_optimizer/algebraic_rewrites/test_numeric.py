@@ -428,3 +428,22 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.EXPM1)
+
+    def test_log1p_of_exp_minus_one_reduces_to_input(self):
+        df = st.as_data_op(0)
+        t1 = df.skb.apply_func(np.exp)
+        t2 = t1 - 1
+        t3 = t2.skb.apply_func(np.log1p)  # log1p(exp(df)-1)
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 1)  # -> log1p(expm1(df)) -> df
+        self.assertEqual(out[0].value, 0)
+
+    def test_exp_log_minus_one_not_fused(self):
+        df = st.as_data_op(1)
+        t1 = df.skb.apply_func(np.log)
+        t2 = t1.skb.apply_func(np.exp)
+        t3 = t2 - 1  # exp(log(x)) - 1
+        out, *_ = optimize(t3)
+        self.assertEqual(len(out), 2)  # exp/log cancel -> x - 1
+        self.assertIsInstance(out[1], NumericOp)
+        self.assertEqual(out[1].type, NumericOpType.SUBTRACT)
