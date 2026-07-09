@@ -418,6 +418,7 @@ class TestCSE(unittest.TestCase):
         self.assertEqual(len(out), 3)
         self.assertIsInstance(out[1], NumericOp)
         self.assertEqual(out[1].type, NumericOpType.EXP)
+
     def test_exp_minus_one_and_identity_operation(self):
         df = st.as_data_op(0)
         t1 = df.skb.apply_func(np.exp)
