@@ -175,6 +175,29 @@ def _resolve_kwargs(kwargs, inputs):
     return {k: _resolve_operand(v, inputs) for k, v in kwargs.items()}
 
 
+def remap_operand_refs(value, mapping: dict):
+    """Return ``value`` with every nested :class:`OperandRef` remapped through
+    ``mapping`` (old input index -> new input index).
+
+    Recurses tuples/lists/dicts and column-expression trees (anything exposing a
+    ``remap_operand_refs`` method, e.g. a ``ColumnExpr`` predicate). This is the
+    single walker shared by CSE edge de-duplication (``_op_cse``) and
+    :meth:`Op._dedupe_input_refs`, so both renumber refs identically -- including
+    refs buried inside a ``ColumnExpr`` field.
+    """
+    if isinstance(value, OperandRef):
+        return OperandRef(mapping[value.k])
+    if isinstance(value, tuple):
+        return tuple(remap_operand_refs(v, mapping) for v in value)
+    if isinstance(value, list):
+        return [remap_operand_refs(v, mapping) for v in value]
+    if isinstance(value, dict):
+        return {k: remap_operand_refs(v, mapping) for k, v in value.items()}
+    if hasattr(value, "remap_operand_refs"):
+        return value.remap_operand_refs(mapping)
+    return value
+
+
 # --- Structure keys for common-subexpression elimination -------------------
 # `Op.structure_key()` returns a hashable value that is equal for two ops iff
 # they are the same computation. Sentinel keys carry a leading marker string so
@@ -297,63 +320,65 @@ class Op():
         self.inputs.append(input)
         return len(self.inputs) - 1
 
-    def _remap_refs(self, value, old_ref, new_ref):
-        """Recursively update OperandRefs after removing an input slot."""
-        if isinstance(value, OperandRef):
-            if value.k == old_ref:
-                return OperandRef(new_ref)
-            elif value.k > old_ref:
-                return OperandRef(value.k - 1)
-        if isinstance(value, tuple):
-            return tuple(self._remap_refs(v, old_ref, new_ref) for v in value)
-        if isinstance(value, list):
-            return [self._remap_refs(v, old_ref, new_ref) for v in value]
-        if isinstance(value, dict):
-            return {k: self._remap_refs(v, old_ref, new_ref) for k, v in value.items()}
-        return value
-
     def _dedupe_input_refs(self, old_ref, new_ref):
         """Remove input slot old_ref and redirect its OperandRefs to new_ref.
 
-        OperandRefs pointing after the removed slot are shifted left by one.
+        ``old_ref`` is always the higher of the two slots (the duplicate we drop)
+        and ``new_ref`` the surviving lower slot. Refs pointing at old_ref are
+        redirected to new_ref; refs pointing after old_ref shift left by one. The
+        renumbering goes through the shared :func:`remap_operand_refs` walker so
+        refs buried in a ``ColumnExpr`` field (e.g. a SelectionOp predicate) are
+        remapped too, not just refs in plain tuples/lists/dicts.
         """
+        n = len(self.inputs)
         self.inputs.pop(old_ref)
+        mapping = {k: (new_ref if k == old_ref else k - 1 if k > old_ref else k)
+                   for k in range(n)}
         for field in getattr(type(self), "fields", []):
             value = getattr(self, field)
-            correct_value = self._remap_refs(value, old_ref, new_ref)
-            if correct_value is not value:
-                setattr(self, field, correct_value)
+            new_value = remap_operand_refs(value, mapping)
+            if new_value is not value:
+                setattr(self, field, new_value)
+
+    def consumes_inputs_positionally(self) -> bool:
+        """Whether this op addresses its inputs by position rather than OperandRef.
+
+        Such ops (ChoiceOp outcomes, ImplOp's cached ``operand_index``) must never
+        have two input slots collapsed into one by edge de-duplication -- their
+        slots are kept distinct instead. Shared with ``_op_cse._can_merge`` so the
+        two dedup paths treat the same op types as un-collapsible.
+        """
+        return False
 
     def replace_input(self, old_input: Op, new_input: Op):
         """Replace an input edge, deduplicating OperandRef-based inputs when needed.
 
         If replacing old_input with new_input would create a duplicate input, keep
-        the leftmost slot and remap OperandRefs away from the removed slot.
+        the leftmost slot and remap OperandRefs away from the removed slot. Ops that
+        consume inputs positionally keep the duplicate slot (a plain swap instead).
         """
-        for i, in_ in enumerate(self.inputs):
-            if in_ is old_input:
-                idx = self._check_dup_in_inputs(new_input)
-                if idx is not None and not self.is_choice():
-                    if idx < i:
-                        self._dedupe_input_refs(old_ref=i, new_ref=idx)
-                    else:
-                        self.inputs[i] = new_input
-                        self._dedupe_input_refs(old_ref=idx, new_ref=i)
-                    return
+        i = self._check_dup_in_inputs(old_input)
+        if i is None:
+            raise ValueError(f"Input {old_input} not found in {self.__class__.__name__}.")
+        idx = self._check_dup_in_inputs(new_input)
+        if idx is not None and idx != i and not self.consumes_inputs_positionally():
+            if idx < i:
+                self._dedupe_input_refs(old_ref=i, new_ref=idx)
+            else:
                 self.inputs[i] = new_input
-                return
-        raise ValueError(f"Input {old_input} not found in {self.__class__.__name__}.")
+                self._dedupe_input_refs(old_ref=idx, new_ref=i)
+            return
+        self.inputs[i] = new_input
 
     def replace_input_of_outputs(self, new_input):
         for out in self.outputs:
             out.replace_input(self, new_input)
 
     def replace_output(self, old_output: Op, new_output: Op):
-        for i, out_ in enumerate(self.outputs):
-            if out_ is old_output:
-                self.outputs[i] = new_output
-                return
-        raise ValueError(f"Output {old_output} not found in {self.__class__.__name__}.")
+        i = self._check_dup_in_outputs(old_output)
+        if i is None:
+            raise ValueError(f"Output {old_output} not found in {self.__class__.__name__}.")
+        self.outputs[i] = new_output
 
     def replace_output_of_inputs(self, new_output):
         for in_ in self.inputs:
@@ -416,6 +441,11 @@ class ImplOp(Op):
         new_op = ImplOp(name=self.name, skrub_impl=new_impl)
         new_op.was_cloned = True
         return new_op
+
+    def consumes_inputs_positionally(self) -> bool:
+        # Inputs are resolved via the cached id(DataOp)->index map, so a collapsed
+        # slot would misalign `operand_index` with `inputs`.
+        return True
 
     @property
     def operand_index(self) -> dict:
@@ -681,6 +711,11 @@ class ChoiceOp(Op):
     def structure_key(self):
         # A choice models alternatives; merging two choices is never valid.
         return None
+
+    def consumes_inputs_positionally(self) -> bool:
+        # Each outcome is consumed by position in `process`, so input slots must
+        # stay distinct even when two outcomes are the same op.
+        return True
 
     def process(self, mode: str, inputs: list):
         results = [{"id" : name, "vals" : inputs[i]} for i, name in enumerate(self.make_outcome_names())]
