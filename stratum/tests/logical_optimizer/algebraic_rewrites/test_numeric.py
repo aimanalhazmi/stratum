@@ -575,3 +575,12 @@ class TestCSE(unittest.TestCase):
 
         out, *_ = optimize(t1)
         self.assertEqual(len(out), 2)                        # ValueOp + MUL survive
+
+    def test_no_crash_exp_minus_ndarray_constant(self):
+        """`exp(x) - ndarray` must not hit the ambiguous-truth-value trap inside
+        match_exp_minus_one (same crash class as the mul/div guards)."""
+        df = st.as_data_op(np.array([1.0, 2.0]))
+        t1 = df.skb.apply_func(np.exp) - np.array([1.0, 1.0])
+
+        out, *_ = optimize(t1)
+        self.assertEqual(len(out), 3)                        # ValueOp + EXP + SUBTRACT survive
