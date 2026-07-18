@@ -27,7 +27,7 @@ from stratum.adapters.string_encoder import (RustyStringEncoder,
                                              supports_rust_string_encoder)
 from stratum.optimizer.ir._ops import TransformerOp
 from stratum.optimizer.physical._lowering import lowering_rule
-from stratum.optimizer.physical._physical_ops import PhysicalOp
+from stratum.optimizer.physical._physical_ops import PhysicalOp, RustPhysicalOp
 from stratum.optimizer.physical._registry import (OperatorFamily, rust_impl,
                                                  sklearn_skrub_impl)
 
@@ -50,9 +50,10 @@ class SkrubStringEncoder(StringEncoderOp):
 
 
 @rust_impl(of=StringEncoderOp)
-class RustStringEncoder(StringEncoderOp):
+class RustStringEncoder(StringEncoderOp, RustPhysicalOp):
     """Native Rust impl: swaps in the ``RustyStringEncoder`` adapter at plan time,
-    so ``process`` runs the Rust kernel with no run-time decision left."""
+    so ``process`` runs the Rust kernel with no run-time decision left. Its Rust
+    capability hints come from ``RustPhysicalOp`` (Rayon: GIL-free, data-parallel)."""
     is_abstract = False
 
     @classmethod
@@ -81,7 +82,7 @@ def _as_rusty_string_encoder(estimator) -> RustyStringEncoder:
 # without an abstract parent op). Selection swaps a supported TransformerOp to
 # this class and its on_impl_selected swaps in the Rust adapter.
 @rust_impl(of=TransformerOp, output_format="matrix")
-class RustOneHotEncoder(TransformerOp, PhysicalOp):
+class RustOneHotEncoder(TransformerOp, RustPhysicalOp):
     """Native Rust one-hot encoder: swaps in ``RustyOneHotEncoder`` at plan time."""
 
     @classmethod
@@ -118,12 +119,3 @@ def lower_transformer(op: TransformerOp, ctx) -> PhysicalOp | None:
             kwargs=op.kwargs, param_refs=op.param_refs,
         )
     return None
-
-
-# The transforms family: abstract physical types produced by lowering TransformerOp.
-TRANSFORMS_FAMILY = OperatorFamily(
-    name="transforms",
-    op_types=(StringEncoderOp,),
-    default_backends=("sklearn-skrub", "rust"),
-    notes="Physical transformer operators lowered from TransformerOp.",
-)

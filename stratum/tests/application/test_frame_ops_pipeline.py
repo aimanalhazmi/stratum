@@ -43,7 +43,7 @@ from stratum.optimizer.ir._map_ops import AssignMapOp
 from stratum.optimizer.ir._projection_ops import (
     ColumnProjectionOp, ColumnSelectorOp)
 from stratum.optimizer.ir._dataframe_ops import ConcatOp
-from stratum.optimizer.ir._ops import EstimatorOp, TransformerOp
+from stratum.optimizer.ir._ops import PredictorOp, TransformerOp
 from stratum.optimizer.physical._physical_ops import PhysicalOp
 from stratum.tests._helpers import csv_file
 from stratum.tests.logical_optimizer.test_dataframe_ops import force_polars
@@ -140,7 +140,7 @@ def test_frame_ops_pipeline_plan(polars):
 
     # The learning ops (transformer, estimator) and the concat are present.
     assert any(isinstance(o, TransformerOp) for o in ops)
-    assert any(isinstance(o, EstimatorOp) for o in ops)
+    assert any(isinstance(o, PredictorOp) for o in ops)
     assert any(isinstance(o, ConcatOp) for o in ops)
 
 
@@ -216,7 +216,7 @@ def test_frame_ops_pipeline_grid_search(polars):
     scorer = make_scorer(r2_score)
     with csv_file(make_orders()) as path:
         preds = build_pipeline(path)
-        with st.config(scheduler=True, rust_backend=False, debug_graph=True):
+        with st.config(scheduler=True, rust_backend=False, debug_graph=False):
             search = preds.skb.make_grid_search(fitted=True, cv=2, scoring=scorer)
             assert search.results_ is not None
             assert len(search.results_) > 0

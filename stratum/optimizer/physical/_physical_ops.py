@@ -94,3 +94,24 @@ class PhysicalOp(IRNode):
         raise TypeError(
             f"{type(self).__name__} is a physical op and must not be cloned; "
             f"cloning happens in the logical phase, before lowering.")
+
+
+class RustPhysicalOp(PhysicalOp):
+    """Base for native Rust physical ops.
+
+    Rust kernels run outside the GIL and parallelize internally (Rayon), so those
+    are the defaults below; a specific kernel may override either as a class
+    attribute. ``@rust_impl`` reads these off the op class into the
+    :class:`~stratum.optimizer.physical._registry.RustPhysicalImpl` registry entry
+    -- the same way ``supports``/``cost``/``exec_mem`` are captured from the class
+    -- so the registry entry and the bound operator agree on the backend's
+    scheduling capabilities and either can reason about them.
+    """
+
+    __slots__ = ()
+
+    #: Kernel releases the GIL while running (safe to run concurrently with others).
+    releases_gil = True
+    #: Kernel already parallelizes internally, so the planner should not also fan
+    #: it out (avoids oversubscription).
+    data_parallel = True

@@ -220,7 +220,7 @@ class BaseEstimatorOp(Op):
     fields = ["estimator", "y", "cols", "how", "allow_reject", "unsupervised", "kwargs", "param_refs"]
 
     def __init__(self, estimator: BaseEstimator, y=None, cols=None, how="no-wrap", allow_reject=False, unsupervised=False, kwargs=None, param_refs=None):
-        super().__init__(name=estimator.__class__.__name__)
+        super().__init__()
         if kwargs is None:
             kwargs = {}
         self.check_kwargs(kwargs)
@@ -291,8 +291,8 @@ class BaseEstimatorOp(Op):
     def get_process_task(self):
         raise NotImplementedError(f"get_process_task must be implemented in {self.__class__.__name__}")
 
-class EstimatorOp(BaseEstimatorOp):
-    logical_family = "Estimator"
+class PredictorOp(BaseEstimatorOp):
+    logical_family = "Predictor"
 
     def get_process_task(self):
         return process_estimator_task
@@ -331,7 +331,7 @@ def check_estm_inputs(estimator, mode, x, y):
             estimator = estimator.transformer
     if input_is_polars and not estm_supports_polars(estimator):
         converted = True
-        logger.debug(f"Estimator {estimator.__class__.__name__} does not support Polars DataFrame. Converting to Pandas DataFrame.")
+        logger.debug(f"Predictor {estimator.__class__.__name__} does not support Polars DataFrame. Converting to Pandas DataFrame.")
         x = x.to_pandas()
         if y is not None and mode == "fit_transform":
             y = y.to_pandas()
@@ -352,7 +352,7 @@ def process_estimator_task(task_data):
         result = estimator.predict(x, **kwargs)
         return result, estimator
     else:
-        raise ValueError(f"Mode {mode} not supported for EstimatorOp.")
+        raise ValueError(f"Mode {mode} not supported for PredictorOp.")
 
 def process_transformer_task(task_data):
     """ Process a transformer (TransformerOp) task in a worker process. """
@@ -558,7 +558,7 @@ def _apply_estimator_op(impl: Apply, estimator, ids_to_ops: dict) -> Op:
         # Same normalization skrub's _wrap_estimator applies at fit time; needed
         # here already because BaseEstimatorOp clones its estimator on construction.
         estimator = PassThrough()
-    estimator_class = EstimatorOp if hasattr(estimator, "predict") else TransformerOp
+    estimator_class = PredictorOp if hasattr(estimator, "predict") else TransformerOp
     binder = OperandBinder(ids_to_ops)
     binder.ref(impl.X)  # OperandRef(0)
     param_refs = {k: binder.ref(v) for k, v in estimator.get_params().items()

@@ -1,12 +1,13 @@
 from stratum.optimizer.ir._dataframe_ops import ConcatOp
 from stratum.optimizer.ir._numeric_ops import NumericOp
-from stratum.optimizer.ir._ops import EstimatorOp, Op, TransformerOp
+from stratum.optimizer.ir._ops import PredictorOp, Op, TransformerOp
 from stratum.optimizer.physical import (
     CURRENT_BACKENDS,
     CURRENT_LOGICAL_OPERATOR_TYPES,
     OperatorFamily,
     PhysicalImpl,
     PhysicalRegistry,
+    RustPhysicalImpl,
     build_default_physical_registry,
 )
 from stratum.optimizer.physical._transform_execs import (RustOneHotEncoder,
@@ -30,7 +31,7 @@ def test_default_registry_has_logical_surface_and_adapter_candidates():
     assert len(rust_candidates) == 1
     assert all(candidate.backend_name == "rust" for candidate in rust_candidates)
     assert len(sklearn_candidates) == 1
-    assert len(registry.candidates_for(EstimatorOp, backend_name="sklearn-skrub")) == 1
+    assert len(registry.candidates_for(PredictorOp, backend_name="sklearn-skrub")) == 1
     # The migrated StringEncoder physical op carries both a skrub and a rust impl.
     assert len(registry.candidates_for(StringEncoderOp, backend_name="rust")) == 1
     assert len(registry.candidates_for(StringEncoderOp, backend_name="sklearn-skrub")) == 1
@@ -48,18 +49,24 @@ def test_rust_kernels_are_class_based_impls():
     assert len(se_rust) == 1 and se_rust[0].impl_class is RustStringEncoder
 
 
-def test_backend_decorators_stamp_capability_hints():
-    # Per-backend decorators carry backend-specific info for the planner: Rust
-    # releases the GIL and is data-parallel; the skrub reference impl neither.
+def test_rust_impl_is_its_own_dataclass_with_capability_hints():
+    # Rust has a dedicated PhysicalImpl subclass carrying scheduling capabilities,
+    # read off the op class (RustPhysicalOp). Other backends stay on the base
+    # PhysicalImpl, which has no such fields -- the schema is not shared.
     registry = build_default_physical_registry()
 
     (rust,) = registry.candidates_for(StringEncoderOp, backend_name="rust")
     (skrub,) = registry.candidates_for(StringEncoderOp, backend_name="sklearn-skrub")
 
+    assert isinstance(rust, RustPhysicalImpl)
     assert rust.impl_class is RustStringEncoder
     assert rust.releases_gil and rust.data_parallel
+    # Hints are sourced from the op class, so the entry and the operator agree.
+    assert RustStringEncoder.releases_gil and RustStringEncoder.data_parallel
+
+    assert type(skrub) is PhysicalImpl
     assert skrub.impl_class is SkrubStringEncoder
-    assert not skrub.releases_gil and skrub.data_parallel
+    assert not hasattr(skrub, "releases_gil")
 
 
 def test_registry_registers_and_queries_impls_by_logical_type():

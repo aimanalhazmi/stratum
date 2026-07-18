@@ -152,16 +152,6 @@ class PolarsInMemoryFrame(InMemoryFrame):
         return rechunk_pl_frame(out) if getattr(self, "rechunk", True) else out
 
 
-# The sources family: abstract physical types produced by lowering DataSourceOp.
-# Registered with the default registry alongside the "logical" passthrough family.
-SOURCES_FAMILY = OperatorFamily(
-    name="sources",
-    op_types=(ReadCSV, ReadParquet, InMemoryFrame, NumpyLoad),
-    default_backends=("pandas", "polars", "numpy"),
-    notes="Physical source operators lowered from DataSourceOp.",
-)
-
-
 @lowering_rule(DataSourceOp)
 def lower_data_source(op: DataSourceOp, ctx):
     """Lower a logical ``DataSourceOp`` to the matching abstract physical source."""

@@ -38,7 +38,7 @@ from stratum.optimizer.ir._ops import (
     SearchEvalOp,
     ValueOp,
     VariableOp,
-    EstimatorOp,
+    PredictorOp,
     TransformerOp,
 )
 BackendName = str
@@ -54,11 +54,10 @@ form the fixed selector-facing API; ``impl_class`` names the concrete
 ``PhysicalOp`` the op is swapped to when this impl is chosen (identity preserved),
 after which its ``on_impl_selected`` folds in any plan-time state.
 
-``releases_gil`` / ``data_parallel`` are backend-specific capability hints,
-stamped by the per-backend registration decorator. No selector consumes them
-yet (the cost model is pending), but they expose to the parallelization planner
-which impls can run concurrently (GIL released) and which already parallelize
-internally (so it can avoid oversubscription)."""
+This is the shared, backend-agnostic schema. A backend that carries extra
+scheduling metadata *subclasses* this (see :class:`RustPhysicalImpl`) instead of
+widening the base, so the common schema stays small as more backends grow their
+own fields."""
 @dataclass(frozen=True, slots=True)
 class PhysicalImpl:
     op_type: type[IRNode]
@@ -71,8 +70,22 @@ class PhysicalImpl:
     execute: Callable[[IRNode, str, list[Any]], Any]
     # Concrete PhysicalOp class the op is swapped to when this impl is chosen.
     impl_class: type | None = None
-    # Backend capability hints (see the class docstring).
+
+
+@dataclass(frozen=True, slots=True)
+class RustPhysicalImpl(PhysicalImpl):
+    """Registry entry for a native Rust implementation.
+
+    Extends the shared schema with the Rust scheduling capabilities. ``@rust_impl``
+    reads these off the op class
+    (:class:`~stratum.optimizer.physical._physical_ops.RustPhysicalOp`) rather than
+    setting them independently, so the entry the planner reasons over and the
+    operator that runs cannot disagree. No selector consumes them yet (the cost
+    model is pending); they exist for the parallelization planner."""
+
+    #: GIL released while the kernel runs; safe to run concurrently with others.
     releases_gil: bool = False
+    #: Kernel parallelizes internally; the planner should not also fan it out.
     data_parallel: bool = False
 
 
@@ -111,7 +124,7 @@ CURRENT_LOGICAL_OPERATOR_TYPES: tuple[type[Op], ...] = (
     ConcatOp,
     DatetimeConversionOp,
     DropOp,
-    EstimatorOp,
+    PredictorOp,
     GetAttrOp,
     GetAttrProjectionOp,
     GetItemOp,
@@ -258,9 +271,8 @@ _DECORATED_IMPLS: list[PhysicalImpl] = []
 
 
 def physical_impl(of: type[IRNode], backend: BackendName,
-                  input_format: str = "frame", output_format: str = "frame",
-                  releases_gil: bool = False, data_parallel: bool = False):
-    """Class decorator registering a concrete PhysicalOp as an implementation.
+                  input_format: str = "frame", output_format: str = "frame"):
+    """Class decorator registering a concrete PhysicalOp as a base PhysicalImpl.
 
     ``of`` is the (abstract) op type the class implements, e.g.::
 
@@ -270,15 +282,15 @@ def physical_impl(of: type[IRNode], backend: BackendName,
     The selector-facing hooks (``supports``/``cost``/``exec_mem``) are taken from
     the class (PhysicalOp provides placeholder defaults); ``execute`` delegates to
     the op's own ``process``, which is concrete once the selection pass has swapped
-    the op to this class. ``releases_gil`` / ``data_parallel`` are backend
-    capability hints (usually supplied by a per-backend decorator, not here).
+    the op to this class.
 
-    Prefer the per-backend decorators (``rust_impl``, ``pandas_impl``, ...) which
-    fix ``backend`` and its capability defaults; this is the general primitive
-    they build on.
+    This builds a base :class:`PhysicalImpl`. Backends that carry extra scheduling
+    metadata have their own decorator (:func:`rust_impl`) that builds the matching
+    :class:`PhysicalImpl` subclass; the plain per-backend decorators below only fix
+    ``backend`` until their backend grows its own schema.
     """
     def deco(cls):
-        impl = PhysicalImpl(
+        _DECORATED_IMPLS.append(PhysicalImpl(
             op_type=of,
             backend_name=backend,
             input_format=input_format,
@@ -288,43 +300,58 @@ def physical_impl(of: type[IRNode], backend: BackendName,
             exec_mem=cls.exec_mem,
             execute=_current_process_execute,
             impl_class=cls,
-            releases_gil=releases_gil,
-            data_parallel=data_parallel,
-        )
-        _DECORATED_IMPLS.append(impl)
+        ))
         return cls
     return deco
 
 
-# Per-backend registration decorators. Each fixes ``backend`` and that backend's
-# default capability hints, so a single unified registry carries backend-specific
-# information the planner can act on. An individual impl may override a default
-# (e.g. a Rust kernel that is not data-parallel) via keyword argument.
-def _backend_impl(backend: BackendName, releases_gil: bool, data_parallel: bool):
+def rust_impl(of: type[IRNode], input_format: str = "frame",
+              output_format: str = "frame"):
+    """Register a native Rust ``PhysicalOp`` as a :class:`RustPhysicalImpl`.
+
+    Like :func:`physical_impl`, but builds the Rust-specific registry entry and
+    reads the Rust capability hints (``releases_gil`` / ``data_parallel``) off the
+    op class -- which should derive from
+    :class:`~stratum.optimizer.physical._physical_ops.RustPhysicalOp` -- so the
+    registry entry and the operator carry the same values.
+    """
+    def deco(cls):
+        _DECORATED_IMPLS.append(RustPhysicalImpl(
+            op_type=of,
+            backend_name="rust",
+            input_format=input_format,
+            output_format=output_format,
+            supports=cls.supports,
+            cost=cls.cost,
+            exec_mem=cls.exec_mem,
+            execute=_current_process_execute,
+            impl_class=cls,
+            releases_gil=cls.releases_gil,
+            data_parallel=cls.data_parallel,
+        ))
+        return cls
+    return deco
+
+
+# Plain per-backend decorators: fix ``backend`` and build a base PhysicalImpl. They
+# exist so call sites read as one backend each; a backend grows its own decorator
+# + PhysicalImpl subclass (as Rust has) once it needs backend-specific fields.
+def _backend_impl(backend: BackendName):
     def decorator(of: type[IRNode], input_format: str = "frame",
-                  output_format: str = "frame",
-                  releases_gil: bool = releases_gil,
-                  data_parallel: bool = data_parallel):
+                  output_format: str = "frame"):
         return physical_impl(of=of, backend=backend,
-                             input_format=input_format, output_format=output_format,
-                             releases_gil=releases_gil, data_parallel=data_parallel)
+                             input_format=input_format, output_format=output_format)
     return decorator
 
 
-#: Native Rust kernels: release the GIL and parallelize internally (Rayon).
-rust_impl = _backend_impl("rust", releases_gil=True, data_parallel=True)
-#: Polars: releases the GIL and parallelizes internally.
-polars_impl = _backend_impl("polars", releases_gil=True, data_parallel=True)
-#: Pandas: single-threaded Python, holds the GIL.
-pandas_impl = _backend_impl("pandas", releases_gil=False, data_parallel=False)
-#: NumPy: C loops release the GIL but do not parallelize on their own.
-numpy_impl = _backend_impl("numpy", releases_gil=True, data_parallel=False)
-#: sklearn / skrub estimators: hold the GIL but can parallelize via n_jobs.
-sklearn_skrub_impl = _backend_impl("sklearn-skrub", releases_gil=False, data_parallel=True)
+polars_impl = _backend_impl("polars")
+pandas_impl = _backend_impl("pandas")
+numpy_impl = _backend_impl("numpy")
+sklearn_skrub_impl = _backend_impl("sklearn-skrub")
 
 
 def _register_current_estimator_impls(registry: PhysicalRegistry) -> None:
-    for op_type in (TransformerOp, EstimatorOp):
+    for op_type in (TransformerOp, PredictorOp):
         registry.register(
             PhysicalImpl(
                 op_type=op_type,
@@ -335,7 +362,6 @@ def _register_current_estimator_impls(registry: PhysicalRegistry) -> None:
                 cost=_placeholder_cost,
                 exec_mem=_placeholder_exec_mem,
                 execute=_current_process_execute,
-                data_parallel=True,
             )
         )
 
@@ -348,8 +374,6 @@ def build_default_physical_registry() -> PhysicalRegistry:
     # decorator / PhysicalImpl), so pulling them in at module level would cycle.
     # Importing each exec module triggers its @physical_impl registrations
     # (including the Rust kernels, now class-based @rust_impl impls).
-    from stratum.optimizer.physical._source_execs import SOURCES_FAMILY  # noqa: F401
-    from stratum.optimizer.physical._transform_execs import TRANSFORMS_FAMILY  # noqa: F401
     from stratum.optimizer.physical import _concat_execs  # noqa: F401
     from stratum.optimizer.physical import _join_execs  # noqa: F401
     from stratum.optimizer.physical import _aggregation_execs  # noqa: F401
@@ -358,8 +382,6 @@ def build_default_physical_registry() -> PhysicalRegistry:
     from stratum.optimizer.physical import _map_execs  # noqa: F401
     from stratum.optimizer.physical import _getitem_execs  # noqa: F401
 
-    registry.register_family(SOURCES_FAMILY)
-    registry.register_family(TRANSFORMS_FAMILY)
     for impl in _DECORATED_IMPLS:
         registry.register(impl)
     _register_current_estimator_impls(registry)
