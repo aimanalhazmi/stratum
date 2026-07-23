@@ -35,7 +35,7 @@ class AlgebraicRewritesConfig:
     add_zero: bool = True
     exp_minus_one: bool = True
     pow_zero: bool = True
-    zero_div: bool = True
+    zero_div: bool = False
     identity_subtract: bool = True
     any_mul_zero: bool = True
     div_by_one: bool = True

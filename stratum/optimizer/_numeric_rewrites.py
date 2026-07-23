@@ -116,11 +116,10 @@ def make_replace_two_op_chain_root_safe(make_replacement):
     return action
 
 def fold_to_zero(op: Op, root: Op) -> Op:
-    """Fold an op whose result is the constant ``0`` to a ``ValueOp(0.0)``.
+    """Replace ``op`` with a ``ValueOp(0.0)`` and drop its operand edges.
 
-    Used for rewrites like ``x * 0`` and ``0 / x``. Drops the op and its input
-    edges and points downstream consumers at a ``ValueOp(0.0)`` instead, so the
-    operand subgraph is never computed.
+    Mechanism only: the caller must ensure folding to 0 is valid for its op
+    (``x * 0`` always is; ``0 / x`` only when x is non-zero and non-NaN).
     """
     zero_op = ValueOp(0.0)
     for operand in op.inputs:
@@ -215,6 +214,9 @@ eliminate_any_mul_zero = rewrite_pass(
     fold_to_zero,
 )
 
+# NOT semantics-preserving in general: 0/x == 0 only when x != 0 (0/0 = NaN),
+# and folding skips evaluating the divisor. Opt-in via the zero_div flag
+# (default off); enable only when the divisor is known non-zero.
 eliminate_zero_div = rewrite_pass(
     match_identity_operation(NumericOp, NumericOpType.DIVIDE, 0, reversed=True),
     fold_to_zero,
