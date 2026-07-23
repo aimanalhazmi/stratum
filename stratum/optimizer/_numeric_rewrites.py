@@ -116,13 +116,11 @@ def make_replace_two_op_chain_root_safe(make_replacement):
     return action
 
 def fold_to_zero(op: Op, root: Op) -> Op:
-    """Constant-fold ``x * 0`` (or ``0 * x``) to ``0``.
+    """Fold an op whose result is the constant ``0`` to a ``ValueOp(0.0)``.
 
-    Unlike the identity rewrites, the result is not the input but a constant, so
-    we drop the multiply and its now-dead operand edges and rewire downstream
-    consumers to a :class:`ValueOp` holding ``0.0``. A ValueOp is a source node
-    (no inputs) whose ``process`` returns the constant directly, so the whole
-    ``x`` subgraph is never computed.
+    Used for rewrites like ``x * 0`` and ``0 / x``. Drops the op and its input
+    edges and points downstream consumers at a ``ValueOp(0.0)`` instead, so the
+    operand subgraph is never computed.
     """
     zero_op = ValueOp(0.0)
     for operand in op.inputs:
@@ -214,6 +212,11 @@ eliminate_identity_subtract = rewrite_pass(
 
 eliminate_any_mul_zero = rewrite_pass(
     match_identity_operation(NumericOp, NumericOpType.MULTIPLY, 0),
+    fold_to_zero,
+)
+
+eliminate_zero_div = rewrite_pass(
+    match_identity_operation(NumericOp, NumericOpType.DIVIDE, 0, reversed=True),
     fold_to_zero,
 )
 
